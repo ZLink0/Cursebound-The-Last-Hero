@@ -1,0 +1,976 @@
+import {
+  ACCESSORIES,
+  ACTIVE_SAVE_SLOT_KEY,
+  ARMORS,
+  ArmorDef,
+  ButtonLayoutConfig,
+  DropKind,
+  GRAPPLE_HOOKS,
+  GUNS,
+  GameSettings,
+  GrappleDef,
+  GrappleId,
+  GunDef,
+  GunId,
+  MAX_EFFECT_POTIONS,
+  MAX_HP_POTIONS,
+  PotionKind,
+  QUESTS,
+  QuestDef,
+  SAVE_SLOT_STORAGE_KEYS,
+  SAVE_STORAGE_KEY,
+  SETTINGS_STORAGE_KEY,
+  SWORDS,
+  SaveSlotId,
+  SaveSlotInfo,
+  SaveState,
+  SwordDef,
+  SwordId,
+} from './types';
+
+export const MAX_LEVEL = 150;
+export const MAX_STAGE = 100;
+export const WORLD_LEVEL_RANGES: readonly { min: number; max: number }[] = [
+  { min: 1, max: 30 },
+  { min: 30, max: 60 },
+  { min: 60, max: 90 },
+  { min: 90, max: 120 },
+  { min: 120, max: 150 },
+];
+export const BASE_AMMO_CAP = 30;
+export const MAX_AMMO_CAP = 100;
+export const MAX_BLOCK_CHARGES = 3;
+
+export const AMMO_UPGRADE_TIERS = [
+  { targetCap: 45, cost: 120 },
+  { targetCap: 60, cost: 240 },
+  { targetCap: 80, cost: 420 },
+  { targetCap: 100, cost: 680 },
+] as const;
+
+export function createDefaultSave(): SaveState {
+  return {
+    version: 3,
+    level: 1,
+    exp: 0,
+    gold: 120,
+    rareCrystals: 2,
+    weaponMaterials: 2,
+    hpPotions: 3,
+    manaPotions: 2,
+    strPotions: 0,
+    spdPotions: 0,
+    defPotions: 0,
+    ammo: BASE_AMMO_CAP,
+    maxAmmo: BASE_AMMO_CAP,
+    highestUnlockedStage: 1,
+    clearedStages: [],
+    ownedSwords: ['iron_sword'],
+    swordUpgrades: { iron_sword: 0 },
+    equippedSword: 'iron_sword',
+    ownedGuns: ['buster_mk1'],
+    gunUpgrades: { buster_mk1: 0 },
+    equippedGun: 'buster_mk1',
+    ownedArmors: ['adventurer_vest'],
+    armorUpgrades: { adventurer_vest: 0 },
+    equippedArmor: 'adventurer_vest',
+    ownedGrapples: ['iron_grapple'],
+    grappleUpgrades: { iron_grapple: 0 },
+    equippedGrapple: 'iron_grapple',
+    ownedAccessories: [],
+    equippedAccessory: null,
+    claimedQuests: [],
+    seenPrologue: false,
+    stats: {
+      enemiesKilled: 0,
+      bossesKilled: 0,
+      crystalsCollected: 2,
+      swordsUpgraded: 0,
+      bestScore: 0,
+    },
+  };
+}
+
+export function createDefaultButtonLayout(): ButtonLayoutConfig {
+  return {
+    preset: 'standard',
+    swapHands: false,
+    buttonScale: 1,
+    verticalAlign: 'center',
+    gapSize: 'normal',
+  };
+}
+
+export function createDefaultSettings(): GameSettings {
+  return {
+    muted: false,
+    volume: 0.65,
+    palette: 'vivid',
+    gameSpeed: 1,
+    touchMode: 'auto',
+    buttonLayout: createDefaultButtonLayout(),
+  };
+}
+
+export function getSwordDef(id: SwordId): SwordDef {
+  return SWORDS.find((s) => s.id === id) ?? SWORDS[0];
+}
+
+export function getGunDef(id: GunId): GunDef {
+  return GUNS.find((g) => g.id === id) ?? GUNS[0];
+}
+
+export function getArmorDef(id: string): ArmorDef {
+  return ARMORS.find((a) => a.id === id) ?? ARMORS[0];
+}
+
+export function getGrappleDef(id: GrappleId): GrappleDef {
+  return GRAPPLE_HOOKS.find((g) => g.id === id) ?? GRAPPLE_HOOKS[0];
+}
+
+export function getExpForNextLevel(level: number): number {
+  if (level >= MAX_LEVEL) return 0;
+  return Math.round(135 + level * 65 + Math.pow(level, 1.75) * 24);
+}
+
+/**
+ * RPG enemy HP capacity scaled to stage level & area so enemies are never 1-hit fodder.
+ * Stage 1 hero (~20 ATK) takes ~3-5 hits per regular enemy; Bosses scale cleanly across 100 stages.
+ */
+export function computeEnemyMaxHp(
+  stage: number,
+  areaIndex: number,
+  mult: number,
+  isBoss: boolean,
+): number {
+  if (isBoss) {
+    const bossScale = 1 + (stage - 1) * 0.08;
+    return Math.round((280 + stage * 52) * bossScale * mult);
+  }
+  const stageScale = 1 + (stage - 1) * 0.14 + areaIndex * 0.05;
+  return Math.round((48 + stage * 13 + areaIndex * 4) * stageScale * mult);
+}
+
+export function getWorldLevelRange(worldIndex: number): { min: number; max: number } {
+  const idx = Math.max(0, Math.min(WORLD_LEVEL_RANGES.length - 1, Math.floor(worldIndex)));
+  return WORLD_LEVEL_RANGES[idx];
+}
+
+/**
+ * Scales enemy level strictly inside each World's range:
+ * World 1 (Stages 1-20): Lv.1-30, World 2 (21-40): Lv.30-60, ..., World 5 (81-100): Lv.120-150.
+ */
+export function getEnemyLevelForStage(stage: number, areaIndex: number): number {
+  const clampedStage = Math.max(1, Math.min(MAX_STAGE, Math.round(stage)));
+  const clampedArea = Math.max(0, Math.min(4, Math.round(areaIndex)));
+  const worldIndex = Math.floor((clampedStage - 1) / 20);
+  const stageInWorld = (clampedStage - 1) % 20; // 0..19
+  const step = stageInWorld * 5 + clampedArea; // 0..99
+  const { min, max } = getWorldLevelRange(worldIndex);
+  return Math.round(min + (step / 99) * (max - min));
+}
+
+/**
+ * Sword slash reach in pixels (16px = 1 block).
+ * Charged Skill Slash reaches 3 blocks (48px) + sword range bonus.
+ */
+export function getSlashReachPx(rangeBonus: number, isHeavy: boolean, isChargedSkill: boolean): number {
+  if (isChargedSkill) {
+    return Math.max(48, 48 + rangeBonus);
+  }
+  return 22 + rangeBonus + (isHeavy ? 6 : 0);
+}
+
+/**
+ * Jump + Down + A triggers Plunge Ground Sword Slam while airborne.
+ */
+export function shouldTriggerPlungeSlam(
+  onGround: boolean,
+  onLadder: boolean,
+  onMonkeyBar: boolean,
+  swordJustPressed: boolean,
+  holdingDown: boolean,
+): boolean {
+  return !onGround && !onLadder && !onMonkeyBar && swordJustPressed && holdingDown;
+}
+
+/**
+ * Area-of-Effect hitbox centered on the plunged sword blade at ground impact.
+ */
+export function computePlungeSlamBox(hx: number, hy: number, rangeBonus: number): {
+  left: number;
+  right: number;
+  top: number;
+  bottom: number;
+  radiusPx: number;
+} {
+  const radiusPx = 56 + Math.min(16, rangeBonus);
+  return {
+    left: hx - radiusPx,
+    right: hx + radiusPx,
+    top: hy - 36,
+    bottom: hy + 8,
+    radiusPx,
+  };
+}
+
+export interface HeroComputedStats {
+  level: number;
+  maxHp: number;
+  maxMp: number;
+  atk: number;
+  gunAtk: number;
+  def: number;
+  critRate: number;
+  speedMult: number;
+  effectiveMaxAmmo: number;
+  swordDef: SwordDef;
+  swordUpgradeLevel: number;
+  gunDef: GunDef;
+  gunUpgradeLevel: number;
+  armorDef: ArmorDef;
+  armorUpgradeLevel: number;
+}
+
+export function computeHeroStats(save: SaveState): HeroComputedStats {
+  const swordDef = getSwordDef(save.equippedSword);
+  const swordUpgradeLevel = save.swordUpgrades[save.equippedSword] ?? 0;
+  const gunDef = getGunDef(save.equippedGun ?? 'buster_mk1');
+  const gunUpgradeLevel = save.gunUpgrades?.[save.equippedGun ?? 'buster_mk1'] ?? 0;
+  const armorDef = getArmorDef(save.equippedArmor);
+  const armorUpgradeLevel = save.armorUpgrades?.[save.equippedArmor] ?? 0;
+  const acc = ACCESSORIES.find((a) => a.id === save.equippedAccessory) ?? null;
+
+  const lvl = Math.max(1, Math.min(MAX_LEVEL, save.level));
+  const maxHp = 80 + (lvl - 1) * 12 + armorDef.hpBonus + armorUpgradeLevel * 10;
+  const maxMp = 40 + (lvl - 1) * 4;
+  const swordAtk = swordDef.baseDamage + swordUpgradeLevel * 4;
+  const baseHeroAtk = 6 + Math.floor((lvl - 1) * 1.8);
+  const atk = baseHeroAtk + swordAtk + (acc?.atkBonus ?? 0);
+  const gunBase = gunDef.baseDamage + gunUpgradeLevel * 3;
+  const gunAtk = Math.round(gunBase + (lvl - 1) * 1.6 + (acc?.atkBonus ?? 0) * 0.6);
+  const def = 2 + Math.floor((lvl - 1) * 0.9) + armorDef.defBonus + armorUpgradeLevel * 3;
+  const critRate = Math.min(0.75, 0.06 + swordDef.critBonus + (acc?.critBonus ?? 0) + lvl * 0.0015);
+  const speedMult = 1 + (acc?.speedBonus ?? 0);
+  const effectiveMaxAmmo = Math.min(MAX_AMMO_CAP + 10, save.maxAmmo + (acc?.ammoBonus ?? 0));
+
+  return {
+    level: lvl,
+    maxHp,
+    maxMp,
+    atk,
+    gunAtk,
+    def,
+    critRate,
+    speedMult,
+    effectiveMaxAmmo,
+    swordDef,
+    swordUpgradeLevel,
+    gunDef,
+    gunUpgradeLevel,
+    armorDef,
+    armorUpgradeLevel,
+  };
+}
+
+export function addExpAndLevelUp(save: SaveState, amount: number): { next: SaveState; levelsGained: number } {
+  let next: SaveState = { ...save, exp: save.exp + Math.max(0, Math.round(amount)) };
+  let levelsGained = 0;
+  while (next.level < MAX_LEVEL) {
+    const needed = getExpForNextLevel(next.level);
+    if (next.exp >= needed) {
+      next = {
+        ...next,
+        exp: next.exp - needed,
+        level: next.level + 1,
+      };
+      levelsGained += 1;
+    } else {
+      break;
+    }
+  }
+  if (next.level >= MAX_LEVEL) {
+    next = { ...next, level: MAX_LEVEL, exp: 0 };
+  }
+  return { next, levelsGained };
+}
+
+export function calculateAttackDamage(params: {
+  rawAtk: number;
+  targetDef?: number;
+  critRate: number;
+  rngValue: number;
+  multiplier?: number;
+  isBossTarget?: boolean;
+  swordId?: SwordId;
+}): { damage: number; isCrit: boolean } {
+  const {
+    rawAtk,
+    targetDef = 0,
+    critRate,
+    rngValue,
+    multiplier = 1,
+    isBossTarget = false,
+    swordId,
+  } = params;
+  let bonus = 1;
+  if (isBossTarget && swordId === 'dragon_slayer') bonus = 1.5;
+  else if (isBossTarget && swordId === 'holy_sword') bonus = 1.35;
+
+  const isCrit = rngValue < critRate;
+  const critMult = isCrit ? 1.75 : 1;
+  const mitigated = Math.max(2, rawAtk * multiplier * bonus - targetDef * 0.45);
+  return {
+    damage: Math.max(1, Math.round(mitigated * critMult)),
+    isCrit,
+  };
+}
+
+export interface CombatHitResult {
+  missed: boolean;
+  damage: number;
+  isCrit: boolean;
+  stunned: boolean;
+}
+
+/**
+ * Shared Miss / Critical / Stun combat resolution for both Hero and Enemies.
+ */
+export function resolveCombatHit(params: {
+  rawAtk: number;
+  targetDef?: number;
+  critRate: number;
+  missChance: number;
+  stunChance: number;
+  rngHit: number;
+  rngCrit: number;
+  rngStun: number;
+  multiplier?: number;
+  isBossTarget?: boolean;
+  swordId?: SwordId;
+}): CombatHitResult {
+  const {
+    rawAtk,
+    targetDef = 0,
+    critRate,
+    missChance,
+    stunChance,
+    rngHit,
+    rngCrit,
+    rngStun,
+    multiplier = 1,
+    isBossTarget = false,
+    swordId,
+  } = params;
+
+  if (rngHit < missChance) {
+    return { missed: true, damage: 0, isCrit: false, stunned: false };
+  }
+
+  let bonus = 1;
+  if (isBossTarget && swordId === 'dragon_slayer') bonus = 1.5;
+  else if (isBossTarget && swordId === 'holy_sword') bonus = 1.35;
+
+  const isCrit = rngCrit < critRate;
+  const critMult = isCrit ? 1.75 : 1;
+  const mitigated = Math.max(2, rawAtk * multiplier * bonus - targetDef * 0.45);
+  const stunned = rngStun < stunChance;
+
+  return {
+    missed: false,
+    damage: Math.max(1, Math.round(mitigated * critMult)),
+    isCrit,
+    stunned,
+  };
+}
+
+/**
+ * Charged Sword Slash (Hold A & release): 30% chance to inflict Stun.
+ */
+export function rollChargedSlashStun(rngValue: number): boolean {
+  return rngValue < 0.30;
+}
+
+/**
+ * Charged Gun Shot (Hold X & release): adds +64px (+4 blocks >= 3+ blocks) to finite range.
+ */
+export function computeChargedGunRange(baseRangePx: number | null): number | null {
+  if (baseRangePx === null) return null;
+  return baseRangePx + 64;
+}
+
+export function computeChargedGunDamage(baseDamage: number): number {
+  return Math.max(2, Math.round(baseDamage * 1.9));
+}
+
+/**
+ * Incoming damage calculation when hero is standing vs blocking (L button).
+ * Blocking with guard charges (> 0) negates all damage (0 HP damage, up to 3 charges).
+ * When guard charges are depleted (0), blocking no longer negates damage.
+ */
+export function computeBlockedDamage(
+  rawDmg: number,
+  def: number,
+  isBlocking: boolean,
+  blockCharges = MAX_BLOCK_CHARGES,
+): number {
+  if (isBlocking && blockCharges > 0) return 0;
+  return Math.max(2, Math.round(rawDmg - def * 0.35));
+}
+
+export function consumeAmmo(currentAmmo: number, amount = 1): { ok: boolean; nextAmmo: number } {
+  if (currentAmmo < amount) {
+    return { ok: false, nextAmmo: currentAmmo };
+  }
+  return { ok: true, nextAmmo: currentAmmo - amount };
+}
+
+export function refillAmmo(currentAmmo: number, maxAmmo: number, amount: number): number {
+  return Math.min(maxAmmo, Math.max(0, currentAmmo + amount));
+}
+
+export function addHpPotion(currentPotions: number, add = 1): { nextPotions: number; overflow: number } {
+  const total = currentPotions + add;
+  if (total <= MAX_HP_POTIONS) {
+    return { nextPotions: total, overflow: 0 };
+  }
+  return { nextPotions: MAX_HP_POTIONS, overflow: total - MAX_HP_POTIONS };
+}
+
+/**
+ * Only 10% of defeated enemies drop an item (Crystal, Iron, Ammo, Potion).
+ */
+export function shouldEnemyDropItem(rngChance: number): boolean {
+  return rngChance < 0.10;
+}
+
+/**
+ * Exact drop item distribution when a drop occurs:
+ * - 10% Rare Crystal [0.00 .. 0.10)
+ * - 10% Iron (weapon_material) [0.10 .. 0.20)
+ * - 10% HP Potion [0.20 .. 0.30)
+ * - 10% Ammo (Small/Med/Large) [0.30 .. 0.40)
+ * - 15% Mana Potion [0.40 .. 0.55)
+ * - 45% Gold [0.55 .. 1.00)
+ */
+export function rollEnemyDropKind(rngDrop: number, rngSub: number): DropKind {
+  if (rngDrop < 0.10) return 'rare_crystal';
+  if (rngDrop < 0.20) return 'weapon_material';
+  if (rngDrop < 0.30) return 'hp_potion';
+  if (rngDrop < 0.40) {
+    if (rngSub < 0.55) return 'ammo_small';
+    if (rngSub < 0.85) return 'ammo_medium';
+    return 'ammo_large';
+  }
+  if (rngDrop < 0.55) return 'mana_potion';
+  return 'gold';
+}
+
+export function getNextAmmoUpgradeTier(currentCap: number): { targetCap: number; cost: number } | null {
+  return AMMO_UPGRADE_TIERS.find((t) => t.targetCap > currentCap) ?? null;
+}
+
+export function upgradeAmmoCapacity(save: SaveState): { ok: boolean; next: SaveState; message: string } {
+  const tier = getNextAmmoUpgradeTier(save.maxAmmo);
+  if (!tier) return { ok: false, next: save, message: 'Ammo already at Max (100)!' };
+  if (save.gold < tier.cost) return { ok: false, next: save, message: `Need ${tier.cost}G` };
+  return {
+    ok: true,
+    next: {
+      ...save,
+      gold: save.gold - tier.cost,
+      maxAmmo: tier.targetCap,
+      ammo: tier.targetCap,
+    },
+    message: `Max Ammo -> ${tier.targetCap}!`,
+  };
+}
+
+export function getSwordUpgradeCost(currentUpgrade: number): { gold: number; materials: number; crystals: number } {
+  const lvl = currentUpgrade + 1;
+  return {
+    gold: 60 + lvl * 55,
+    materials: 1 + Math.floor(lvl / 2),
+    crystals: lvl >= 4 ? Math.floor((lvl - 2) / 2) : 0,
+  };
+}
+
+export function upgradeSword(save: SaveState, swordId: SwordId): { ok: boolean; next: SaveState; message: string } {
+  if (!save.ownedSwords.includes(swordId)) {
+    return { ok: false, next: save, message: 'Sword not owned' };
+  }
+  const cur = save.swordUpgrades[swordId] ?? 0;
+  if (cur >= 10) return { ok: false, next: save, message: 'Max +10 reached' };
+  const cost = getSwordUpgradeCost(cur);
+  if (save.gold < cost.gold || save.weaponMaterials < cost.materials || save.rareCrystals < cost.crystals) {
+    return { ok: false, next: save, message: 'Not enough Gold/Iron/Crystal' };
+  }
+  return {
+    ok: true,
+    next: {
+      ...save,
+      gold: save.gold - cost.gold,
+      weaponMaterials: save.weaponMaterials - cost.materials,
+      rareCrystals: save.rareCrystals - cost.crystals,
+      swordUpgrades: { ...save.swordUpgrades, [swordId]: cur + 1 },
+      stats: { ...save.stats, swordsUpgraded: save.stats.swordsUpgraded + 1 },
+    },
+    message: `${getSwordDef(swordId).name} +${cur + 1}!`,
+  };
+}
+
+export function craftSword(save: SaveState, swordId: SwordId): { ok: boolean; next: SaveState; message: string } {
+  if (save.ownedSwords.includes(swordId)) {
+    return { ok: false, next: save, message: 'Already owned' };
+  }
+  const def = getSwordDef(swordId);
+  if (!def.craftCost) return { ok: false, next: save, message: 'Cannot be forged' };
+  const { gold, materials, crystals } = def.craftCost;
+  if (save.gold < gold || save.weaponMaterials < materials || save.rareCrystals < crystals) {
+    return { ok: false, next: save, message: `Need ${gold}G, ${materials} Iron, ${crystals} CR` };
+  }
+  return {
+    ok: true,
+    next: {
+      ...save,
+      gold: save.gold - gold,
+      weaponMaterials: save.weaponMaterials - materials,
+      rareCrystals: save.rareCrystals - crystals,
+      ownedSwords: [...save.ownedSwords, swordId],
+      swordUpgrades: { ...save.swordUpgrades, [swordId]: 0 },
+      equippedSword: swordId,
+    },
+    message: `Forged ${def.name}!`,
+  };
+}
+
+export function upgradeGun(save: SaveState, gunId: GunId): { ok: boolean; next: SaveState; message: string } {
+  if (!save.ownedGuns.includes(gunId)) {
+    return { ok: false, next: save, message: 'Gun not owned' };
+  }
+  const cur = save.gunUpgrades[gunId] ?? 0;
+  if (cur >= 10) return { ok: false, next: save, message: 'Max +10 reached' };
+  const cost = getSwordUpgradeCost(cur);
+  if (save.gold < cost.gold || save.weaponMaterials < cost.materials || save.rareCrystals < cost.crystals) {
+    return { ok: false, next: save, message: 'Not enough Gold/Iron/Crystal' };
+  }
+  return {
+    ok: true,
+    next: {
+      ...save,
+      gold: save.gold - cost.gold,
+      weaponMaterials: save.weaponMaterials - cost.materials,
+      rareCrystals: save.rareCrystals - cost.crystals,
+      gunUpgrades: { ...save.gunUpgrades, [gunId]: cur + 1 },
+      stats: { ...save.stats, swordsUpgraded: save.stats.swordsUpgraded + 1 },
+    },
+    message: `${getGunDef(gunId).name} +${cur + 1}!`,
+  };
+}
+
+export function craftGun(save: SaveState, gunId: GunId): { ok: boolean; next: SaveState; message: string } {
+  if (save.ownedGuns.includes(gunId)) {
+    return { ok: false, next: save, message: 'Already owned' };
+  }
+  const def = getGunDef(gunId);
+  if (!def.craftCost) return { ok: false, next: save, message: 'Cannot be forged' };
+  const { gold, materials, crystals } = def.craftCost;
+  if (save.gold < gold || save.weaponMaterials < materials || save.rareCrystals < crystals) {
+    return { ok: false, next: save, message: `Need ${gold}G, ${materials} Iron, ${crystals} CR` };
+  }
+  return {
+    ok: true,
+    next: {
+      ...save,
+      gold: save.gold - gold,
+      weaponMaterials: save.weaponMaterials - materials,
+      rareCrystals: save.rareCrystals - crystals,
+      ownedGuns: [...save.ownedGuns, gunId],
+      gunUpgrades: { ...save.gunUpgrades, [gunId]: 0 },
+      equippedGun: gunId,
+    },
+    message: `Forged ${def.name}!`,
+  };
+}
+
+export function craftArmor(save: SaveState, armorId: string): { ok: boolean; next: SaveState; message: string } {
+  if (save.ownedArmors.includes(armorId)) {
+    return { ok: false, next: save, message: 'Already owned' };
+  }
+  const def = ARMORS.find((a) => a.id === armorId);
+  if (!def || !def.craftCost) return { ok: false, next: save, message: 'Cannot be forged' };
+  const { gold, materials, crystals } = def.craftCost;
+  if (save.gold < gold || save.weaponMaterials < materials || save.rareCrystals < crystals) {
+    return { ok: false, next: save, message: `Need ${gold}G, ${materials} Iron, ${crystals} CR` };
+  }
+  return {
+    ok: true,
+    next: {
+      ...save,
+      gold: save.gold - gold,
+      weaponMaterials: save.weaponMaterials - materials,
+      rareCrystals: save.rareCrystals - crystals,
+      ownedArmors: [...save.ownedArmors, armorId],
+      armorUpgrades: { ...(save.armorUpgrades ?? {}), [armorId]: 0 },
+      equippedArmor: armorId,
+    },
+    message: `Forged ${def.name}!`,
+  };
+}
+
+export function upgradeArmor(save: SaveState, armorId: string): { ok: boolean; next: SaveState; message: string } {
+  if (!save.ownedArmors.includes(armorId)) {
+    return { ok: false, next: save, message: 'Armor not owned' };
+  }
+  const cur = save.armorUpgrades?.[armorId] ?? 0;
+  if (cur >= 10) return { ok: false, next: save, message: 'Max +10 reached' };
+  const cost = getSwordUpgradeCost(cur);
+  if (save.gold < cost.gold || save.weaponMaterials < cost.materials || save.rareCrystals < cost.crystals) {
+    return { ok: false, next: save, message: 'Not enough Gold/Iron/Crystal' };
+  }
+  return {
+    ok: true,
+    next: {
+      ...save,
+      gold: save.gold - cost.gold,
+      weaponMaterials: save.weaponMaterials - cost.materials,
+      rareCrystals: save.rareCrystals - cost.crystals,
+      armorUpgrades: { ...(save.armorUpgrades ?? {}), [armorId]: cur + 1 },
+      stats: { ...save.stats, swordsUpgraded: save.stats.swordsUpgraded + 1 },
+    },
+    message: `${getArmorDef(armorId).name} +${cur + 1}!`,
+  };
+}
+
+export function craftGrapple(save: SaveState, grappleId: GrappleId): { ok: boolean; next: SaveState; message: string } {
+  if (save.ownedGrapples?.includes(grappleId)) {
+    return { ok: false, next: save, message: 'Already owned' };
+  }
+  const def = GRAPPLE_HOOKS.find((g) => g.id === grappleId);
+  if (!def || !def.craftCost) return { ok: false, next: save, message: 'Cannot be forged' };
+  const { gold, materials, crystals } = def.craftCost;
+  if (save.gold < gold || save.weaponMaterials < materials || save.rareCrystals < crystals) {
+    return { ok: false, next: save, message: `Need ${gold}G, ${materials} Iron, ${crystals} CR` };
+  }
+  return {
+    ok: true,
+    next: {
+      ...save,
+      gold: save.gold - gold,
+      weaponMaterials: save.weaponMaterials - materials,
+      rareCrystals: save.rareCrystals - crystals,
+      ownedGrapples: [...(save.ownedGrapples ?? ['iron_grapple']), grappleId],
+      grappleUpgrades: { ...(save.grappleUpgrades ?? {}), [grappleId]: 0 },
+      equippedGrapple: grappleId,
+    },
+    message: `Forged ${def.name}!`,
+  };
+}
+
+export function upgradeGrapple(save: SaveState, grappleId: GrappleId): { ok: boolean; next: SaveState; message: string } {
+  if (!save.ownedGrapples?.includes(grappleId)) {
+    return { ok: false, next: save, message: 'Grapple not owned' };
+  }
+  const cur = save.grappleUpgrades?.[grappleId] ?? 0;
+  if (cur >= 10) return { ok: false, next: save, message: 'Max +10 reached' };
+  const cost = getSwordUpgradeCost(cur);
+  if (save.gold < cost.gold || save.weaponMaterials < cost.materials || save.rareCrystals < cost.crystals) {
+    return { ok: false, next: save, message: 'Not enough Gold/Iron/Crystal' };
+  }
+  return {
+    ok: true,
+    next: {
+      ...save,
+      gold: save.gold - cost.gold,
+      weaponMaterials: save.weaponMaterials - cost.materials,
+      rareCrystals: save.rareCrystals - cost.crystals,
+      grappleUpgrades: { ...(save.grappleUpgrades ?? {}), [grappleId]: cur + 1 },
+      stats: { ...save.stats, swordsUpgraded: save.stats.swordsUpgraded + 1 },
+    },
+    message: `${getGrappleDef(grappleId).name} +${cur + 1}!`,
+  };
+}
+
+// Shop ONLY sells consumables, ammo upgrades, and accessories (Weapons & Armor are Blacksmith-only)
+export function buyShopItem(
+  save: SaveState,
+  item: PotionKind | 'mana_potion' | 'ammo_pack' | 'ammo_upgrade' | { accessoryId: string },
+): { ok: boolean; next: SaveState; message: string } {
+  const stats = computeHeroStats(save);
+  if (item === 'hp_potion') {
+    if (save.hpPotions >= MAX_HP_POTIONS) {
+      return { ok: false, next: save, message: `HP Potion Max (${MAX_HP_POTIONS})!` };
+    }
+    const cost = 40;
+    if (save.gold < cost) return { ok: false, next: save, message: 'Need 40G' };
+    return {
+      ok: true,
+      next: { ...save, gold: save.gold - cost, hpPotions: Math.min(MAX_HP_POTIONS, save.hpPotions + 1) },
+      message: 'Bought HP Potion',
+    };
+  }
+  if (item === 'str_potion') {
+    const cur = save.strPotions ?? 0;
+    if (cur >= MAX_EFFECT_POTIONS) {
+      return { ok: false, next: save, message: `STR+ Potion Max (${MAX_EFFECT_POTIONS})!` };
+    }
+    const cost = 55;
+    if (save.gold < cost) return { ok: false, next: save, message: 'Need 55G' };
+    return {
+      ok: true,
+      next: { ...save, gold: save.gold - cost, strPotions: Math.min(MAX_EFFECT_POTIONS, cur + 1) },
+      message: 'Bought STR+ Potion',
+    };
+  }
+  if (item === 'spd_potion') {
+    const cur = save.spdPotions ?? 0;
+    if (cur >= MAX_EFFECT_POTIONS) {
+      return { ok: false, next: save, message: `Speed+ Potion Max (${MAX_EFFECT_POTIONS})!` };
+    }
+    const cost = 50;
+    if (save.gold < cost) return { ok: false, next: save, message: 'Need 50G' };
+    return {
+      ok: true,
+      next: { ...save, gold: save.gold - cost, spdPotions: Math.min(MAX_EFFECT_POTIONS, cur + 1) },
+      message: 'Bought Speed+ Potion',
+    };
+  }
+  if (item === 'def_potion') {
+    const cur = save.defPotions ?? 0;
+    if (cur >= MAX_EFFECT_POTIONS) {
+      return { ok: false, next: save, message: `Defense+ Potion Max (${MAX_EFFECT_POTIONS})!` };
+    }
+    const cost = 50;
+    if (save.gold < cost) return { ok: false, next: save, message: 'Need 50G' };
+    return {
+      ok: true,
+      next: { ...save, gold: save.gold - cost, defPotions: Math.min(MAX_EFFECT_POTIONS, cur + 1) },
+      message: 'Bought Defense+ Potion',
+    };
+  }
+  if (item === 'mana_potion') {
+    const cost = 45;
+    if (save.gold < cost) return { ok: false, next: save, message: 'Need 45G' };
+    return { ok: true, next: { ...save, gold: save.gold - cost, manaPotions: save.manaPotions + 1 }, message: 'Bought Mana Potion' };
+  }
+  if (item === 'ammo_pack') {
+    const cost = 35;
+    if (save.gold < cost) return { ok: false, next: save, message: 'Need 35G' };
+    if (save.ammo >= stats.effectiveMaxAmmo) return { ok: false, next: save, message: 'Ammo already full' };
+    return {
+      ok: true,
+      next: {
+        ...save,
+        gold: save.gold - cost,
+        ammo: refillAmmo(save.ammo, stats.effectiveMaxAmmo, 20),
+      },
+      message: '+20 Ammo!',
+    };
+  }
+  if (item === 'ammo_upgrade') {
+    return upgradeAmmoCapacity(save);
+  }
+  if ('accessoryId' in item) {
+    const acc = ACCESSORIES.find((a) => a.id === item.accessoryId);
+    if (!acc) return { ok: false, next: save, message: 'Unknown accessory' };
+    if (save.ownedAccessories.includes(acc.id)) return { ok: false, next: save, message: 'Already owned' };
+    if (save.gold < acc.price) return { ok: false, next: save, message: `Need ${acc.price}G` };
+    return {
+      ok: true,
+      next: {
+        ...save,
+        gold: save.gold - acc.price,
+        ownedAccessories: [...save.ownedAccessories, acc.id],
+        equippedAccessory: acc.id,
+      },
+      message: `Equipped ${acc.name}!`,
+    };
+  }
+  return { ok: false, next: save, message: 'Invalid item' };
+}
+
+export function getQuestProgress(save: SaveState, quest: QuestDef): number {
+  switch (quest.targetType) {
+    case 'clear_stage':
+      return save.clearedStages.includes(quest.targetCount) ? quest.targetCount : Math.min(quest.targetCount - 1, save.clearedStages.length);
+    case 'kill_enemies':
+      return Math.min(quest.targetCount, save.stats.enemiesKilled);
+    case 'collect_crystals':
+      return Math.min(quest.targetCount, save.stats.crystalsCollected);
+    case 'kill_bosses':
+      return Math.min(quest.targetCount, save.stats.bossesKilled);
+    case 'upgrade_sword':
+      return Math.min(quest.targetCount, save.stats.swordsUpgraded);
+  }
+}
+
+export function isQuestComplete(save: SaveState, quest: QuestDef): boolean {
+  if (quest.targetType === 'clear_stage') {
+    return save.clearedStages.includes(quest.targetCount);
+  }
+  return getQuestProgress(save, quest) >= quest.targetCount;
+}
+
+export function claimQuestReward(save: SaveState, questId: string): { ok: boolean; next: SaveState; message: string } {
+  const quest = QUESTS.find((q) => q.id === questId);
+  if (!quest) return { ok: false, next: save, message: 'Quest not found' };
+  if (save.claimedQuests.includes(questId)) return { ok: false, next: save, message: 'Already claimed' };
+  if (!isQuestComplete(save, quest)) return { ok: false, next: save, message: 'Quest incomplete' };
+
+  const ownedSwords =
+    quest.rewardSwordId && !save.ownedSwords.includes(quest.rewardSwordId)
+      ? [...save.ownedSwords, quest.rewardSwordId]
+      : save.ownedSwords;
+  const swordUpgrades =
+    quest.rewardSwordId && save.swordUpgrades[quest.rewardSwordId] === undefined
+      ? { ...save.swordUpgrades, [quest.rewardSwordId]: 0 }
+      : save.swordUpgrades;
+
+  const withLoot: SaveState = {
+    ...save,
+    gold: save.gold + quest.rewardGold,
+    rareCrystals: save.rareCrystals + quest.rewardCrystals,
+    weaponMaterials: save.weaponMaterials + quest.rewardMaterials,
+    ownedSwords,
+    swordUpgrades,
+    claimedQuests: [...save.claimedQuests, questId],
+  };
+  const { next } = addExpAndLevelUp(withLoot, quest.rewardExp);
+  return {
+    ok: true,
+    next,
+    message: quest.rewardSwordId
+      ? `Claimed + ${getSwordDef(quest.rewardSwordId).name}!`
+      : `Claimed ${quest.rewardGold}G!`,
+  };
+}
+
+function normalizeSaveState(parsed: SaveState): SaveState | null {
+  if (!parsed || typeof parsed.level !== 'number') return null;
+  const def = createDefaultSave();
+  return {
+    ...def,
+    ...parsed,
+    hpPotions: Math.min(MAX_HP_POTIONS, parsed.hpPotions ?? def.hpPotions),
+    strPotions: Math.min(MAX_EFFECT_POTIONS, parsed.strPotions ?? def.strPotions),
+    spdPotions: Math.min(MAX_EFFECT_POTIONS, parsed.spdPotions ?? def.spdPotions),
+    defPotions: Math.min(MAX_EFFECT_POTIONS, parsed.defPotions ?? def.defPotions),
+    ownedGuns: parsed.ownedGuns?.length ? parsed.ownedGuns : def.ownedGuns,
+    gunUpgrades: parsed.gunUpgrades ?? def.gunUpgrades,
+    equippedGun: parsed.equippedGun ?? def.equippedGun,
+    armorUpgrades: parsed.armorUpgrades ?? def.armorUpgrades,
+    ownedGrapples: parsed.ownedGrapples?.length ? parsed.ownedGrapples : def.ownedGrapples,
+    grappleUpgrades: parsed.grappleUpgrades ?? def.grappleUpgrades,
+    equippedGrapple: parsed.equippedGrapple ?? def.equippedGrapple,
+    seenPrologue: parsed.seenPrologue ?? (parsed.clearedStages?.length ? true : def.seenPrologue),
+  };
+}
+
+export function getActiveSaveSlot(): SaveSlotId {
+  try {
+    const raw = Number(localStorage.getItem(ACTIVE_SAVE_SLOT_KEY));
+    if (raw === 1 || raw === 2 || raw === 3) return raw;
+  } catch {
+    // ignore
+  }
+  return 1;
+}
+
+export function setActiveSaveSlot(slot: SaveSlotId): void {
+  try {
+    localStorage.setItem(ACTIVE_SAVE_SLOT_KEY, String(slot));
+  } catch {
+    // ignore
+  }
+}
+
+export function loadSaveState(slot?: SaveSlotId): SaveState | null {
+  const targetSlot = slot ?? getActiveSaveSlot();
+  try {
+    const slotKey = SAVE_SLOT_STORAGE_KEYS[targetSlot];
+    const raw = localStorage.getItem(slotKey);
+    if (raw) {
+      return normalizeSaveState(JSON.parse(raw) as SaveState);
+    }
+    // Migrate legacy single-slot save into Slot 1 if present
+    if (targetSlot === 1) {
+      const legacyRaw = localStorage.getItem(SAVE_STORAGE_KEY);
+      if (legacyRaw) {
+        const migrated = normalizeSaveState(JSON.parse(legacyRaw) as SaveState);
+        if (migrated) {
+          localStorage.setItem(slotKey, JSON.stringify(migrated));
+          return migrated;
+        }
+      }
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+export function persistSaveState(save: SaveState, slot?: SaveSlotId): void {
+  const targetSlot = slot ?? getActiveSaveSlot();
+  try {
+    localStorage.setItem(SAVE_SLOT_STORAGE_KEYS[targetSlot], JSON.stringify(save));
+    if (slot !== undefined) {
+      setActiveSaveSlot(slot);
+    }
+  } catch {
+    // ignore quota errors
+  }
+}
+
+export function clearSaveSlot(slot: SaveSlotId): void {
+  try {
+    localStorage.removeItem(SAVE_SLOT_STORAGE_KEYS[slot]);
+    if (slot === 1) {
+      localStorage.removeItem(SAVE_STORAGE_KEY);
+    }
+  } catch {
+    // ignore
+  }
+}
+
+export function getAllSaveSlots(): SaveSlotInfo[] {
+  return ([1, 2, 3] as SaveSlotId[]).map((slot) => ({
+    slot,
+    save: loadSaveState(slot),
+  }));
+}
+
+export function loadSettings(): GameSettings {
+  try {
+    const raw = localStorage.getItem(SETTINGS_STORAGE_KEY);
+    if (!raw) return createDefaultSettings();
+    const parsed = JSON.parse(raw) as Partial<GameSettings>;
+    const def = createDefaultSettings();
+    return {
+      ...def,
+      ...parsed,
+      buttonLayout: {
+        ...def.buttonLayout,
+        ...(parsed.buttonLayout ?? {}),
+      },
+    };
+  } catch {
+    return createDefaultSettings();
+  }
+}
+
+export function persistSettings(settings: GameSettings): void {
+  try {
+    localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(settings));
+  } catch {
+    // ignore
+  }
+}
+
+/**
+ * Resolves Y button action:
+ * - Y + forward direction (dirInput === facing) -> Forward 'dash'
+ * - Y alone (dirInput === 0) or Y + backward -> Backstep 'dodge'
+ */
+export function resolveDashOrDodge(dirInput: number, facing: -1 | 1): 'dash' | 'dodge' {
+  return dirInput !== 0 && dirInput === facing ? 'dash' : 'dodge';
+}
